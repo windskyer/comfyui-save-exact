@@ -1,7 +1,7 @@
 """
 ComfyUI Save Exact — 保存图片/视频/音频,文件名完全由 filename_prefix / filename 决定,
-不追加 00001 之类的自增计数器。默认覆盖同名文件,适合 pipeline.py 这类自动化流程
-(输出文件名可预测,无需解析 history 猜文件名)。
+filename 非空时不追加 00001 之类的自增计数器。默认覆盖同名文件,适合 pipeline.py
+这类自动化流程(输出文件名可预测,无需解析 history 猜文件名)。
 
 节点:
   - SaveImageExact  (images: IMAGE)
@@ -11,7 +11,7 @@ ComfyUI Save Exact — 保存图片/视频/音频,文件名完全由 filename_pr
 命名规则:
   - filename_prefix 作为目录名,filename 作为文件名,最终路径为 filename_prefix/filename
   - filename 可含子目录(如 "scene01/shot03" → filename_prefix/scene01/shot03.ext)
-  - filename 为空 → 用 "output" 作为文件名
+  - filename 为空 → 使用自增序号命名(00001.ext, 00002.ext ...),取目录中现有最大序号 + 1
   - 若名字自带扩展名(.png/.mp4/.flac 等)则尊重之,否则使用 format 参数
   - 批量图片/音频:单张直接存 base.ext;多张存 base_0.ext, base_1.ext ...
   - overwrite=False 时遇到同名文件直接报错,不会静默改名
@@ -36,9 +36,12 @@ MEDIA_EXTS = {
 
 def _resolve_name(filename_prefix, filename, default_ext):
     """返回 (subfolder, base, ext)。filename_prefix 是目录,filename 是文件名,
-    最终路径为 filename_prefix/filename。"""
+    最终路径为 filename_prefix/filename。filename 为空时 base 为 None,
+    表示使用自增序号命名。"""
     prefix = (filename_prefix or "").strip().replace("\\", "/").strip("/")
-    name = (filename or "").strip().replace("\\", "/").strip("/") or "output"
+    name = (filename or "").strip().replace("\\", "/").strip("/")
+    if not name:
+        return prefix, None, default_ext
     raw = f"{prefix}/{name}" if prefix else name
     subfolder, base = os.path.split(raw)
     root, ext = os.path.splitext(base)
@@ -47,8 +50,6 @@ def _resolve_name(filename_prefix, filename, default_ext):
         base = root
     else:
         ext = default_ext
-    if not base:
-        base = "output"
     return subfolder, base, ext
 
 
@@ -62,12 +63,35 @@ def _prepare_dir(subfolder):
     return full_dir
 
 
-def _target_path(full_dir, base, idx, total, ext, overwrite):
-    name = f"{base}.{ext}" if total == 1 else f"{base}_{idx}.{ext}"
-    path = os.path.join(full_dir, name)
-    if not overwrite and os.path.exists(path):
-        raise FileExistsError(f"文件已存在且 overwrite=False: {path}")
-    return name, path
+def _next_index(full_dir, ext):
+    """扫描目录中形如 00001.ext 的文件,返回下一个可用序号。"""
+    max_idx = 0
+    for f in os.listdir(full_dir):
+        root, e = os.path.splitext(f)
+        if e.lstrip(".").lower() == ext and root.isdigit():
+            max_idx = max(max_idx, int(root))
+    return max_idx + 1
+
+
+def _build_namer(full_dir, base, total, ext, overwrite):
+    """返回 namer(i) -> (name, path)。base 为 None 时使用自增序号命名,
+    永不与已有文件冲突;否则按 base 命名,多文件时追加 _i 后缀。"""
+    if base is None:
+        start = _next_index(full_dir, ext)
+
+        def namer(i):
+            name = f"{start + i:05d}.{ext}"
+            return name, os.path.join(full_dir, name)
+    else:
+
+        def namer(i):
+            name = f"{base}.{ext}" if total == 1 else f"{base}_{i}.{ext}"
+            path = os.path.join(full_dir, name)
+            if not overwrite and os.path.exists(path):
+                raise FileExistsError(f"文件已存在且 overwrite=False: {path}")
+            return name, path
+
+    return namer
 
 
 # --------------------------------------------------------------------------
@@ -107,11 +131,12 @@ class SaveImageExact:
         full_dir = _prepare_dir(subfolder)
 
         total = images.shape[0]
+        namer = _build_namer(full_dir, base, total, ext, overwrite)
         results = []
         for i in range(total):
             arr = (images[i].cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
             img = Image.fromarray(arr)
-            name, path = _target_path(full_dir, base, i, total, ext, overwrite)
+            name, path = namer(i)
 
             if ext == "png":
                 pnginfo = None
@@ -170,7 +195,7 @@ class SaveVideoExact:
         ext = "mp4" if format == "auto" else format
         subfolder, base, ext = _resolve_name(filename_prefix, filename, ext)
         full_dir = _prepare_dir(subfolder)
-        name, path = _target_path(full_dir, base, 0, 1, ext, overwrite)
+        name, path = _build_namer(full_dir, base, 1, ext, overwrite)(0)
         if overwrite and os.path.exists(path):
             os.remove(path)  # 某些容器写入器不支持覆盖已存在文件
 
@@ -239,12 +264,13 @@ class SaveAudioExact:
             waveform = waveform.unsqueeze(0)
 
         total = waveform.shape[0]
+        namer = _build_namer(full_dir, base, total, ext, overwrite)
         results = []
         for i in range(total):
             wav = waveform[i].cpu()
             if wav.dtype != torch.float32:
                 wav = wav.float()
-            name, path = _target_path(full_dir, base, i, total, ext, overwrite)
+            name, path = namer(i)
             torchaudio.save(path, wav, sample_rate, format=ext)
             results.append({"filename": name, "subfolder": subfolder, "type": "output"})
 
