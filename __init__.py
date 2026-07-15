@@ -9,8 +9,9 @@ ComfyUI Save Exact — 保存图片/视频/音频,文件名完全由 filename_pr
   - SaveAudioExact  (audio: AUDIO)
 
 命名规则:
-  - filename 非空 → 用 filename(可含子目录,如 "scene01/shot03")
-  - filename 为空 → 用 filename_prefix
+  - filename_prefix 作为目录名,filename 作为文件名,最终路径为 filename_prefix/filename
+  - filename 可含子目录(如 "scene01/shot03" → filename_prefix/scene01/shot03.ext)
+  - filename 为空 → 用 "output" 作为文件名
   - 若名字自带扩展名(.png/.mp4/.flac 等)则尊重之,否则使用 format 参数
   - 批量图片/音频:单张直接存 base.ext;多张存 base_0.ext, base_1.ext ...
   - overwrite=False 时遇到同名文件直接报错,不会静默改名
@@ -34,9 +35,11 @@ MEDIA_EXTS = {
 
 
 def _resolve_name(filename_prefix, filename, default_ext):
-    """返回 (subfolder, base, ext)。filename 优先于 filename_prefix。"""
-    raw = (filename or "").strip() or (filename_prefix or "").strip() or "output"
-    raw = raw.replace("\\", "/").strip("/")
+    """返回 (subfolder, base, ext)。filename_prefix 是目录,filename 是文件名,
+    最终路径为 filename_prefix/filename。"""
+    prefix = (filename_prefix or "").strip().replace("\\", "/").strip("/")
+    name = (filename or "").strip().replace("\\", "/").strip("/") or "output"
+    raw = f"{prefix}/{name}" if prefix else name
     subfolder, base = os.path.split(raw)
     root, ext = os.path.splitext(base)
     ext = ext.lstrip(".").lower()
@@ -76,7 +79,7 @@ class SaveImageExact:
         return {
             "required": {
                 "images": ("IMAGE",),
-                "filename_prefix": ("STRING", {"default": "output"}),
+                "filename_prefix": ("STRING", {"default": ""}),
             },
             "optional": {
                 "filename": ("STRING", {"default": ""}),
@@ -142,7 +145,7 @@ class SaveVideoExact:
         return {
             "required": {
                 "video": ("VIDEO",),
-                "filename_prefix": ("STRING", {"default": "output"}),
+                "filename_prefix": ("STRING", {"default": ""}),
             },
             "optional": {
                 "filename": ("STRING", {"default": ""}),
@@ -209,7 +212,7 @@ class SaveAudioExact:
         return {
             "required": {
                 "audio": ("AUDIO",),
-                "filename_prefix": ("STRING", {"default": "output"}),
+                "filename_prefix": ("STRING", {"default": ""}),
             },
             "optional": {
                 "filename": ("STRING", {"default": ""}),
