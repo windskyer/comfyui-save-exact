@@ -21,7 +21,6 @@ import os
 import json
 
 import numpy as np
-import torch
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 
@@ -252,8 +251,12 @@ class SaveAudioExact:
     CATEGORY = "audio"
     DESCRIPTION = "保存音频,文件名精确可控,无自增计数器"
 
+    # 用 PyAV 编码(与 ComfyUI 官方 SaveAudio 节点一致),
+    # 不依赖 torchaudio 的保存后端(torchaudio>=2.9 需额外安装 torchcodec)
+    CODECS = {"flac": "flac", "wav": "pcm_s16le", "mp3": "libmp3lame"}
+
     def save(self, audio, filename_prefix, filename="", format="flac", overwrite=True):
-        import torchaudio
+        import av
 
         subfolder, base, ext = _resolve_name(filename_prefix, filename, format)
         full_dir = _prepare_dir(subfolder)
@@ -267,11 +270,21 @@ class SaveAudioExact:
         namer = _build_namer(full_dir, base, total, ext, overwrite)
         results = []
         for i in range(total):
-            wav = waveform[i].cpu()
-            if wav.dtype != torch.float32:
-                wav = wav.float()
+            wav = waveform[i].cpu().float()  # [C, T]
             name, path = namer(i)
-            torchaudio.save(path, wav, sample_rate, format=ext)
+            layout = "mono" if wav.shape[0] == 1 else "stereo"
+            with av.open(path, mode="w", format=ext) as container:
+                # layout 必须显式指定,否则 stream 默认 stereo,单声道会被上混成双声道
+                stream = container.add_stream(self.CODECS[ext], rate=sample_rate, layout=layout)
+                frame = av.AudioFrame.from_ndarray(
+                    wav.movedim(0, 1).reshape(1, -1).numpy(),  # 交错为 [1, C*T]
+                    format="flt",
+                    layout=layout,
+                )
+                frame.sample_rate = sample_rate
+                frame.pts = 0
+                container.mux(stream.encode(frame))
+                container.mux(stream.encode(None))  # flush 编码器缓冲
             results.append({"filename": name, "subfolder": subfolder, "type": "output"})
 
         return {"ui": {"audio": results}}

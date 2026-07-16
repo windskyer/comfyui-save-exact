@@ -1,0 +1,4 @@
+# 以下依赖均为 ComfyUI 核心依赖,正常情况下已随 ComfyUI 安装,此处仅作声明
+numpy
+Pillow
+av
